@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS votes;
+DROP TABLE IF EXISTS responses;
+DROP TABLE IF EXISTS decisions;
