@@ -4,19 +4,13 @@ Link-centric decision-rating app with Go API + Next.js frontend.
 
 ## Run
 
-1. Start Postgres:
+1. Bootstrap database (recommended for team setup):
 
 ```bash
-make db-up
+make dev-up
 ```
 
-2. Apply migrations:
-
-```bash
-make migrate-up
-```
-
-3. Start REST server:
+2. Start REST server:
 
 ```bash
 make run-server
@@ -24,19 +18,31 @@ make run-server
 
 Server listens on `http://localhost:8080`.
 
-4. Install frontend dependencies:
+3. Install frontend dependencies:
 
 ```bash
 make web-install
 ```
 
-5. Run frontend:
+4. Run frontend:
 
 ```bash
 make run-web
 ```
 
 Frontend runs on `http://localhost:3000`.
+
+## Database Helpers
+
+Useful Docker DB commands:
+
+```bash
+make db-up      # start postgres container
+make db-down    # stop containers
+make db-logs    # stream postgres logs
+make db-shell   # open psql shell inside postgres container
+make db-reset   # drop volume, recreate DB, rerun migrations (destructive)
+```
 
 ## Environment
 
