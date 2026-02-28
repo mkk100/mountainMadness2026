@@ -35,9 +35,9 @@ Copy `.env.example` values into your shell environment as needed:
 
 - `GET /health` -> `{"ok": true}`
 - `POST /api/decisions`
-- `GET /api/decisions/{slug}`
+- `GET /api/decisions/{slug}?viewer_id=<uuid>`
 - `POST /api/decisions/{slug}/responses`
-- `POST /api/responses/{responseID}/votes`
+- `POST /api/responses/{responseID}/vote`
 
 ## Example Requests
 
@@ -51,6 +51,12 @@ curl -X POST http://localhost:8080/api/decisions \
     "description": "New job, expensive rent.",
     "closes_at": null
   }'
+```
+
+Get a decision + stats + responses:
+
+```bash
+curl "http://localhost:8080/api/decisions/<slug>?viewer_id=9e3d295a-9dd7-4e04-9385-d6aa0b4ce3f2"
 ```
 
 Submit a response:
@@ -69,10 +75,10 @@ curl -X POST http://localhost:8080/api/decisions/<slug>/responses \
 Vote on a response:
 
 ```bash
-curl -X POST http://localhost:8080/api/responses/<response-id>/votes \
+curl -X POST http://localhost:8080/api/responses/<response-id>/vote \
   -H "Content-Type: application/json" \
   -d '{
-    "voter_viewer_id": "992f80ff-d9d8-47fd-97c0-c140aeb5232a",
+    "viewer_id": "992f80ff-d9d8-47fd-97c0-c140aeb5232a",
     "value": 1
   }'
 ```
