@@ -45,6 +45,7 @@ type Server struct {
 func New(db *sql.DB) nethttp.Handler {
 	s := &Server{db: db}
 	r := chi.NewRouter()
+	r.Use(s.corsMiddleware)
 
 	r.Get("/health", s.handleHealth)
 	r.Post("/api/decisions", s.handleCreateDecision)
@@ -466,7 +467,7 @@ func (s *Server) loadResponseCards(ctx context.Context, decisionID uuid.UUID, vi
 		LEFT JOIN votes v ON v.response_id = r.id
 		WHERE r.decision_id = $1
 		GROUP BY r.id
-		ORDER BY r.created_at DESC
+		ORDER BY COALESCE(SUM(v.value), 0) DESC, r.created_at DESC
 	`, decisionID, viewerParam)
 	if err != nil {
 		return nil, err
@@ -609,6 +610,21 @@ func clamp(value, minValue, maxValue float64) float64 {
 		return maxValue
 	}
 	return value
+}
+
+func (s *Server) corsMiddleware(next nethttp.Handler) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == nethttp.MethodOptions {
+			w.WriteHeader(nethttp.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func decodeJSON(r *nethttp.Request, out any) error {

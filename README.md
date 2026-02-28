@@ -1,6 +1,6 @@
 # RateMyLifeDecision
 
-Link-centric decision-rating app backend in Go + Postgres.
+Link-centric decision-rating app with Go API + Next.js frontend.
 
 ## Run
 
@@ -24,12 +24,27 @@ make run-server
 
 Server listens on `http://localhost:8080`.
 
+4. Install frontend dependencies:
+
+```bash
+make web-install
+```
+
+5. Run frontend:
+
+```bash
+make run-web
+```
+
+Frontend runs on `http://localhost:3000`.
+
 ## Environment
 
 Copy `.env.example` values into your shell environment as needed:
 
 - `PORT` (default `8080`)
 - `DATABASE_URL` (default local Postgres DSN)
+- Frontend env: copy `web/.env.example` to `web/.env.local` if needed.
 
 ## Endpoints
 
@@ -38,6 +53,11 @@ Copy `.env.example` values into your shell environment as needed:
 - `GET /api/decisions/{slug}?viewer_id=<uuid>`
 - `POST /api/decisions/{slug}/responses`
 - `POST /api/responses/{responseID}/vote`
+
+## Frontend Routes
+
+- `/` Create Decision page (generate share link + copy button)
+- `/d/{slug}` Decision page (submit response, view stats, vote on responses)
 
 ## Example Requests
 
