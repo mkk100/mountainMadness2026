@@ -39,11 +39,12 @@ var allowedEmojis = map[string]struct{}{
 }
 
 type Server struct {
-	db *sql.DB
+	db            *sql.DB
+	openaiAPIKey string
 }
 
-func New(db *sql.DB) nethttp.Handler {
-	s := &Server{db: db}
+func New(db *sql.DB, openaiAPIKey string) nethttp.Handler {
+	s := &Server{db: db, openaiAPIKey: openaiAPIKey}
 	r := chi.NewRouter()
 	r.Use(s.corsMiddleware)
 
@@ -93,17 +94,27 @@ func (s *Server) handleCreateDecision(w nethttp.ResponseWriter, r *nethttp.Reque
 	}
 
 	ctx := r.Context()
+
+	// Call OpenAI to categorize the decision
+	prompt := fmt.Sprintf("Categorize this decision into ONE of these categories: Career, Relationship, Health, Financial, Personal, or Other. Only respond with the category name.\n\nDecision: %s", title)
+	category, err := callOpenAI(ctx, s.openaiAPIKey, prompt)
+	if err != nil {
+		// If categorization fails, default to "Other" and continue
+		category = "Other"
+	}
+
 	var slug string
 	for i := 0; i < slugMaxAttempts; i++ {
 		slug = fmt.Sprintf("%s-%s", baseSlug, randSuffix(5))
 		_, err := s.db.ExecContext(
 			ctx,
-			`INSERT INTO decisions (id, slug, title, description, closes_at) VALUES ($1, $2, $3, $4, $5)`,
+			`INSERT INTO decisions (id, slug, title, description, closes_at, category) VALUES ($1, $2, $3, $4, $5, $6)`,
 			decisionID,
 			slug,
 			title,
 			req.Description,
 			req.ClosesAt,
+			category,
 		)
 		if err == nil {
 			writeJSON(w, nethttp.StatusCreated, createDecisionResponse{
@@ -730,4 +741,67 @@ func randSuffix(length int) string {
 		b.WriteByte(letters[n.Int64()])
 	}
 	return b.String()
+}
+
+func callOpenAI(ctx context.Context, apiKey string, prompt string) (string, error) {
+	type message struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+
+	type openAIRequest struct {
+		Model       string    `json:"model"`
+		Messages    []message `json:"messages"`
+		MaxTokens   int       `json:"max_tokens"`
+		Temperature float64   `json:"temperature"`
+	}
+
+	type openAIResponse struct {
+		Choices []struct {
+			Message message `json:"message"`
+		} `json:"choices"`
+	}
+
+	reqBody, err := json.Marshal(openAIRequest{
+		Model: "gpt-3.5-turbo",
+		Messages: []message{
+			{
+				Role:    "user",
+				Content: prompt,
+			},
+		},
+		MaxTokens:   50,
+		Temperature: 0.7,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal OpenAI request: %w", err)
+	}
+
+	req, err := nethttp.NewRequestWithContext(ctx, nethttp.MethodPost, "https://api.openai.com/v1/chat/completions", strings.NewReader(string(reqBody)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create OpenAI request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	
+	resp, err := nethttp.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to call OpenAI API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != nethttp.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("OpenAI API error: %s", string(body))
+	}
+
+	var openResp openAIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&openResp); err != nil {
+		return "", fmt.Errorf("failed to decode OpenAI response: %w", err)
+	}
+	if len(openResp.Choices) == 0 {
+		return "", errors.New("OpenAI response contains no choices")
+	}
+
+	return strings.TrimSpace(openResp.Choices[0].Message.Content), nil
 }

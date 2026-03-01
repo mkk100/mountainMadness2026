@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"ratemylifedecision/internal/config"
@@ -21,9 +22,14 @@ func main() {
 	}
 	defer db.Close()
 
+	openaiAPIKey := os.Getenv("OPENAI_API_KEY")
+	if openaiAPIKey == "" {
+		log.Println("warning: OPENAI_API_KEY not set, decision categorization will use default category")
+	}
+
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           httpapi.New(db),
+		Handler:           httpapi.New(db, openaiAPIKey),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
