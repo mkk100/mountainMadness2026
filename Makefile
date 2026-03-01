@@ -47,7 +47,7 @@ migrate-up:
 	DATABASE_URL=$(DATABASE_URL) go run ./cmd/migrate up
 
 run-server:
-	PORT=$(PORT) DATABASE_URL=$(DATABASE_URL) OPENAI_API_KEY=$(OPENAI_API_KEY) go run ./cmd/server
+	PORT=$(PORT) DATABASE_URL=$(DATABASE_URL) go run ./cmd/server
 
 web-install:
 	npm --prefix web install
