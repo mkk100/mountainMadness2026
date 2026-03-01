@@ -4,13 +4,19 @@ Link-centric decision-rating app with Go API + Next.js frontend.
 
 ## Run
 
-1. Bootstrap database (recommended for team setup):
+1. Create local env file:
+
+```bash
+cp .env.example .env
+```
+
+2. Bootstrap database in Docker (recommended for team setup):
 
 ```bash
 make dev-up
 ```
 
-2. Start REST server:
+3. Start REST server:
 
 ```bash
 make run-server
@@ -18,13 +24,13 @@ make run-server
 
 Server listens on `http://localhost:8080`.
 
-3. Install frontend dependencies:
+4. Install frontend dependencies:
 
 ```bash
 make web-install
 ```
 
-4. Run frontend:
+5. Run frontend:
 
 ```bash
 make run-web
@@ -44,12 +50,18 @@ make db-shell   # open psql shell inside postgres container
 make db-reset   # drop volume, recreate DB, rerun migrations (destructive)
 ```
 
+If your laptop already uses Postgres on `5432`, change `POSTGRES_HOST_PORT` in `.env` (for example `5433`) and set `DATABASE_URL` to match that port.
+
 ## Environment
 
-Copy `.env.example` values into your shell environment as needed:
+`.env` drives both Docker Postgres and app runtime via Make:
 
 - `PORT` (default `8080`)
-- `DATABASE_URL` (default local Postgres DSN)
+- `POSTGRES_DB`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
+- `POSTGRES_HOST_PORT`
+- `DATABASE_URL` (must match `POSTGRES_HOST_PORT`)
 - Frontend env: copy `web/.env.example` to `web/.env.local` if needed.
 
 ## Endpoints

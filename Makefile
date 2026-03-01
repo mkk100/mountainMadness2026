@@ -1,11 +1,25 @@
 APP_NAME=ratemylifedecision
 
-.PHONY: dev-up wait-db db-up db-down db-logs db-shell db-reset migrate-up run-server web-install run-web test
+ifneq (,$(wildcard .env))
+include .env
+endif
 
-dev-up: db-up wait-db migrate-up
+PORT ?= 8080
+POSTGRES_DB ?= ratemylifedecision
+POSTGRES_USER ?= postgres
+POSTGRES_PASSWORD ?= postgres
+POSTGRES_HOST_PORT ?= 5432
+DATABASE_URL ?= postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(POSTGRES_HOST_PORT)/$(POSTGRES_DB)?sslmode=disable
+
+.PHONY: env-init dev-up wait-db db-up db-down db-logs db-shell db-reset migrate-up run-server web-install run-web test
+
+env-init:
+	@test -f .env || cp .env.example .env
+
+dev-up: env-init db-up wait-db migrate-up
 
 wait-db:
-	@until docker compose exec -T postgres pg_isready -U postgres -d ratemylifedecision >/dev/null 2>&1; do \
+	@until docker compose exec -T postgres pg_isready -U $(POSTGRES_USER) -d $(POSTGRES_DB) >/dev/null 2>&1; do \
 		echo "Waiting for postgres to be ready..."; \
 		sleep 1; \
 	done
@@ -21,7 +35,7 @@ db-logs:
 	docker compose logs -f postgres
 
 db-shell:
-	docker compose exec postgres psql -U postgres -d ratemylifedecision
+	docker compose exec postgres psql -U $(POSTGRES_USER) -d $(POSTGRES_DB)
 
 db-reset:
 	docker compose down -v
@@ -30,16 +44,16 @@ db-reset:
 	$(MAKE) migrate-up
 
 migrate-up:
-	go run ./cmd/migrate up
+	DATABASE_URL=$(DATABASE_URL) go run ./cmd/migrate up
 
 run-server:
-	go run ./cmd/server
+	PORT=$(PORT) DATABASE_URL=$(DATABASE_URL) go run ./cmd/server
 
 web-install:
 	npm --prefix web install
 
 run-web:
-	npm --prefix web run dev
+	PORT=3000 npm --prefix web run dev
 
 test:
 	go test ./...
