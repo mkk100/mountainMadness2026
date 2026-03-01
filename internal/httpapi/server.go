@@ -21,8 +21,13 @@ import (
 )
 
 const (
-	slugMaxAttempts  = 8
-	maxCommentLength = 180
+	slugMaxAttempts            = 8
+	maxCommentLength           = 180
+	suggestionWeight           = 0.35
+	ratingWeight               = 0.30
+	commentSentimentWeight     = 0.20
+	postVoteWeight             = 0.15
+	recommendationYesThreshold = 0.0
 )
 
 var allowedCategories = []string{
@@ -47,17 +52,56 @@ var allowedCategories = []string{
 	"Other",
 }
 
-var allowedEmojis = map[string]struct{}{
-	"😭":  {},
-	"😬":  {},
-	"🧨":  {},
-	"🤡":  {},
-	"🫡":  {},
-	"🧠":  {},
-	"🔥":  {},
-	"🥶":  {},
-	"❤️": {},
-	"🫠":  {},
+var emojiRatings = map[string]int{
+	"🫠": 1,
+	"😭": 2,
+	"😬": 3,
+	"😄": 4,
+	"🫡": 5,
+}
+
+var positiveSentimentWords = map[string]struct{}{
+	"amazing":     {},
+	"better":      {},
+	"benefit":     {},
+	"best":        {},
+	"excellent":   {},
+	"good":        {},
+	"great":       {},
+	"growth":      {},
+	"happy":       {},
+	"love":        {},
+	"opportunity": {},
+	"positive":    {},
+	"safe":        {},
+	"smart":       {},
+	"strong":      {},
+	"support":     {},
+	"upside":      {},
+	"worth":       {},
+	"yes":         {},
+	"win":         {},
+}
+
+var negativeSentimentWords = map[string]struct{}{
+	"bad":       {},
+	"concern":   {},
+	"costly":    {},
+	"difficult": {},
+	"downside":  {},
+	"expensive": {},
+	"hard":      {},
+	"hate":      {},
+	"loss":      {},
+	"negative":  {},
+	"no":        {},
+	"problem":   {},
+	"risk":      {},
+	"risky":     {},
+	"stress":    {},
+	"unsafe":    {},
+	"worse":     {},
+	"worst":     {},
 }
 
 type Server struct {
@@ -172,10 +216,11 @@ Decision: %s`, title)
 }
 
 type decisionResponsePayload struct {
-	ViewerID string  `json:"viewer_id"`
-	Rating   int     `json:"rating"`
-	Emoji    string  `json:"emoji"`
-	Comment  *string `json:"comment"`
+	ViewerID   string  `json:"viewer_id"`
+	Rating     int     `json:"rating"`
+	Suggestion int     `json:"suggestion"`
+	Emoji      string  `json:"emoji"`
+	Comment    *string `json:"comment"`
 }
 
 func (s *Server) handleCreateResponse(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -196,12 +241,13 @@ func (s *Server) handleCreateResponse(w nethttp.ResponseWriter, r *nethttp.Reque
 		writeError(w, nethttp.StatusBadRequest, "viewer_id must be a valid UUID")
 		return
 	}
-	if req.Rating < 1 || req.Rating > 5 {
-		writeError(w, nethttp.StatusBadRequest, "rating must be between 1 and 5")
+	if req.Suggestion < 1 || req.Suggestion > 3 {
+		writeError(w, nethttp.StatusBadRequest, "suggestion must be 1 (don't do it), 2 (mixed), or 3 (do it)")
 		return
 	}
 	emoji := strings.TrimSpace(req.Emoji)
-	if _, ok := allowedEmojis[emoji]; !ok {
+	rating, ok := emojiRatings[emoji]
+	if !ok {
 		writeError(w, nethttp.StatusBadRequest, "emoji is invalid")
 		return
 	}
@@ -230,19 +276,24 @@ func (s *Server) handleCreateResponse(w nethttp.ResponseWriter, r *nethttp.Reque
 
 	responseID := uuid.New()
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO responses (id, decision_id, viewer_id, rating, emoji, comment)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO responses (id, decision_id, viewer_id, rating, suggestion, emoji, comment)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`,
 		responseID,
 		decision.ID,
 		viewerID,
-		req.Rating,
+		rating,
+		req.Suggestion,
 		emoji,
 		comment,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, nethttp.StatusConflict, "viewer already submitted a response for this decision")
+			return
+		}
+		if isUndefinedColumn(err) {
+			writeError(w, nethttp.StatusInternalServerError, "database schema is out of date. Run migrations and restart the server")
 			return
 		}
 		writeError(w, nethttp.StatusInternalServerError, "failed to create response")
@@ -323,6 +374,7 @@ func (s *Server) handleDecisionVote(w nethttp.ResponseWriter, r *nethttp.Request
 type decisionEnvelope struct {
 	Decision           decisionView        `json:"decision"`
 	Stats              decisionStats       `json:"stats"`
+	Recommendation     recommendationView  `json:"recommendation"`
 	PostVote           decisionVoteSummary `json:"post_vote"`
 	ViewerHasResponded bool                `json:"viewer_has_responded"`
 	Responses          []responseCard      `json:"responses"`
@@ -342,8 +394,24 @@ type decisionStats struct {
 	RatingCounts  []int        `json:"rating_counts"`
 	AvgRating     float64      `json:"avg_rating"`
 	NetSentiment  float64      `json:"net_sentiment"`
+	Categories    voteBuckets  `json:"categories"`
 	EmojiCounts   []emojiCount `json:"emoji_counts"`
 	TopEmoji      string       `json:"top_emoji"`
+}
+
+type recommendationView struct {
+	Decision         string  `json:"decision"`
+	Score            float64 `json:"score"`
+	SuggestionScore  float64 `json:"suggestion_score"`
+	RatingScore      float64 `json:"rating_score"`
+	CommentSentiment float64 `json:"comment_sentiment"`
+	PostVoteScore    float64 `json:"post_vote_score"`
+}
+
+type voteBuckets struct {
+	DoIt     int `json:"do_it"`
+	DontDoIt int `json:"dont_do_it"`
+	Mixed    int `json:"mixed"`
 }
 
 type emojiCount struct {
@@ -352,11 +420,12 @@ type emojiCount struct {
 }
 
 type responseCard struct {
-	ID        string    `json:"id"`
-	Rating    int       `json:"rating"`
-	Emoji     string    `json:"emoji"`
-	Comment   *string   `json:"comment"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	Rating     int       `json:"rating"`
+	Suggestion int       `json:"suggestion"`
+	Emoji      string    `json:"emoji"`
+	Comment    *string   `json:"comment"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type decisionRecord struct {
@@ -394,7 +463,21 @@ func (s *Server) handleGetDecision(w nethttp.ResponseWriter, r *nethttp.Request)
 
 	stats, err := s.loadDecisionStats(ctx, decision.ID)
 	if err != nil {
+		if isUndefinedColumn(err) {
+			writeError(w, nethttp.StatusInternalServerError, "database schema is out of date. Run migrations and restart the server")
+			return
+		}
 		writeError(w, nethttp.StatusInternalServerError, "failed to load decision stats")
+		return
+	}
+
+	recommendation, err := s.loadRecommendation(ctx, decision.ID)
+	if err != nil {
+		if isUndefinedColumn(err) {
+			writeError(w, nethttp.StatusInternalServerError, "database schema is out of date. Run migrations and restart the server")
+			return
+		}
+		writeError(w, nethttp.StatusInternalServerError, "failed to compute decision recommendation")
 		return
 	}
 
@@ -412,6 +495,10 @@ func (s *Server) handleGetDecision(w nethttp.ResponseWriter, r *nethttp.Request)
 
 	responses, err := s.loadResponseCards(ctx, decision.ID)
 	if err != nil {
+		if isUndefinedColumn(err) {
+			writeError(w, nethttp.StatusInternalServerError, "database schema is out of date. Run migrations and restart the server")
+			return
+		}
 		writeError(w, nethttp.StatusInternalServerError, "failed to load responses")
 		return
 	}
@@ -426,6 +513,7 @@ func (s *Server) handleGetDecision(w nethttp.ResponseWriter, r *nethttp.Request)
 			CreatedAt:   decision.CreatedAt,
 		},
 		Stats:              stats,
+		Recommendation:     recommendation,
 		PostVote:           postVote,
 		ViewerHasResponded: viewerHasResponded,
 		Responses:          responses,
@@ -465,6 +553,9 @@ func (s *Server) loadDecisionStats(ctx context.Context, decisionID uuid.UUID) (d
 		r3            int
 		r4            int
 		r5            int
+		s1            int
+		s2            int
+		s3            int
 		avgRating     float64
 	)
 
@@ -476,10 +567,13 @@ func (s *Server) loadDecisionStats(ctx context.Context, decisionID uuid.UUID) (d
 			COUNT(*) FILTER (WHERE rating = 3)::int AS r3,
 			COUNT(*) FILTER (WHERE rating = 4)::int AS r4,
 			COUNT(*) FILTER (WHERE rating = 5)::int AS r5,
+			COUNT(*) FILTER (WHERE suggestion = 1)::int AS s1,
+			COUNT(*) FILTER (WHERE suggestion = 2)::int AS s2,
+			COUNT(*) FILTER (WHERE suggestion = 3)::int AS s3,
 			COALESCE(AVG(rating), 0)::float8 AS avg_rating
 		FROM responses
 		WHERE decision_id = $1
-	`, decisionID).Scan(&responseCount, &r1, &r2, &r3, &r4, &r5, &avgRating)
+	`, decisionID).Scan(&responseCount, &r1, &r2, &r3, &r4, &r5, &s1, &s2, &s3, &avgRating)
 	if err != nil {
 		return decisionStats{}, err
 	}
@@ -519,10 +613,153 @@ func (s *Server) loadDecisionStats(ctx context.Context, decisionID uuid.UUID) (d
 		RatingCounts:  []int{r1, r2, r3, r4, r5},
 		AvgRating:     avgRating,
 		NetSentiment:  netSentiment,
-		EmojiCounts:   emojiCounts,
-		TopEmoji:      topEmoji,
+		Categories: voteBuckets{
+			DoIt:     s3,
+			DontDoIt: s1,
+			Mixed:    s2,
+		},
+		EmojiCounts: emojiCounts,
+		TopEmoji:    topEmoji,
 	}
 	return stats, nil
+}
+
+func (s *Server) loadRecommendation(ctx context.Context, decisionID uuid.UUID) (recommendationView, error) {
+	var (
+		voteSum   int
+		voteCount int
+	)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(value), 0)::int AS vote_sum,
+			COUNT(*)::int AS vote_count
+		FROM decision_votes
+		WHERE decision_id = $1
+	`, decisionID).Scan(&voteSum, &voteCount)
+	if err != nil {
+		return recommendationView{}, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT suggestion, rating, comment
+		FROM responses
+		WHERE decision_id = $1
+	`, decisionID)
+	if err != nil {
+		return recommendationView{}, err
+	}
+	defer rows.Close()
+
+	var (
+		responseCount         int
+		commentCount          int
+		suggestionScoreTotal  float64
+		ratingScoreTotal      float64
+		commentSentimentTotal float64
+	)
+
+	for rows.Next() {
+		var (
+			suggestion int
+			rating     int
+			comment    *string
+		)
+		if err := rows.Scan(&suggestion, &rating, &comment); err != nil {
+			return recommendationView{}, err
+		}
+
+		responseCount++
+		suggestionScoreTotal += suggestionToScore(suggestion)
+		ratingScoreTotal += clamp((float64(rating)-3.0)/2.0, -1.0, 1.0)
+
+		if comment != nil {
+			commentSentimentTotal += analyzeCommentSentiment(*comment)
+			commentCount++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return recommendationView{}, err
+	}
+
+	suggestionScore := 0.0
+	ratingScore := 0.0
+	commentSentiment := 0.0
+	postVoteScore := 0.0
+
+	if responseCount > 0 {
+		suggestionScore = suggestionScoreTotal / float64(responseCount)
+		ratingScore = ratingScoreTotal / float64(responseCount)
+	}
+	if commentCount > 0 {
+		commentSentiment = commentSentimentTotal / float64(commentCount)
+	}
+	if voteCount > 0 {
+		postVoteScore = clamp(float64(voteSum)/float64(voteCount), -1.0, 1.0)
+	}
+
+	score := clamp(
+		(suggestionWeight*suggestionScore)+
+			(ratingWeight*ratingScore)+
+			(commentSentimentWeight*commentSentiment)+
+			(postVoteWeight*postVoteScore),
+		-1.0,
+		1.0,
+	)
+
+	decision := "no"
+	if score >= recommendationYesThreshold {
+		decision = "yes"
+	}
+
+	return recommendationView{
+		Decision:         decision,
+		Score:            score,
+		SuggestionScore:  suggestionScore,
+		RatingScore:      ratingScore,
+		CommentSentiment: commentSentiment,
+		PostVoteScore:    postVoteScore,
+	}, nil
+}
+
+func suggestionToScore(suggestion int) float64 {
+	switch suggestion {
+	case 1:
+		return -1.0
+	case 2:
+		return 0.0
+	case 3:
+		return 1.0
+	default:
+		return 0.0
+	}
+}
+
+func analyzeCommentSentiment(comment string) float64 {
+	words := strings.FieldsFunc(strings.ToLower(comment), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '\''
+	})
+	if len(words) == 0 {
+		return 0.0
+	}
+
+	positiveCount := 0
+	negativeCount := 0
+	for _, word := range words {
+		normalized := strings.ReplaceAll(word, "'", "")
+		if _, ok := positiveSentimentWords[normalized]; ok {
+			positiveCount++
+		}
+		if _, ok := negativeSentimentWords[normalized]; ok {
+			negativeCount++
+		}
+	}
+
+	totalHits := positiveCount + negativeCount
+	if totalHits == 0 {
+		return 0.0
+	}
+
+	return clamp(float64(positiveCount-negativeCount)/float64(totalHits), -1.0, 1.0)
 }
 
 func (s *Server) loadResponseCards(ctx context.Context, decisionID uuid.UUID) ([]responseCard, error) {
@@ -530,6 +767,7 @@ func (s *Server) loadResponseCards(ctx context.Context, decisionID uuid.UUID) ([
 		SELECT
 			r.id,
 			r.rating,
+			r.suggestion,
 			r.emoji,
 			r.comment,
 			r.created_at
@@ -549,6 +787,7 @@ func (s *Server) loadResponseCards(ctx context.Context, decisionID uuid.UUID) ([
 		if err := rows.Scan(
 			&id,
 			&item.Rating,
+			&item.Suggestion,
 			&item.Emoji,
 			&item.Comment,
 			&item.CreatedAt,
@@ -735,6 +974,11 @@ func isUniqueViolation(err error) bool {
 func isForeignKeyViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23503"
+}
+
+func isUndefinedColumn(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42703"
 }
 
 func slugify(input string) string {
