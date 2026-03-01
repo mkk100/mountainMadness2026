@@ -25,6 +25,28 @@ const (
 	maxCommentLength = 180
 )
 
+var allowedCategories = []string{
+	"Career",
+	"Relationship",
+	"Health",
+	"Financial",
+	"Personal",
+	"Travel",
+	"Education",
+	"Family",
+	"Hobbies",
+	"Home",
+	"Food",
+	"Entertainment",
+	"Shopping",
+	"Fitness",
+	"Social",
+	"Technology",
+	"Pet",
+	"Self-Care",
+	"Other",
+}
+
 var allowedEmojis = map[string]struct{}{
 	"😭":  {},
 	"😬":  {},
@@ -94,13 +116,26 @@ func (s *Server) handleCreateDecision(w nethttp.ResponseWriter, r *nethttp.Reque
 	}
 
 	ctx := r.Context()
+	prompt := fmt.Sprintf(`Classify this decision into exactly ONE of these categories: Career, Relationship, Health, Financial, Personal, Travel, Education, Family, Hobbies, Home, Food, Entertainment, Shopping, Fitness, Social, Technology, Pet, Self-Care, or Other.
 
-	// Call OpenAI to categorize the decision
-	prompt := fmt.Sprintf("Categorize this decision into ONE of these categories: Career, Relationship, Health, Financial, Personal, or Other. Only respond with the category name.\n\nDecision: %s", title)
+Respond with ONLY the category name, nothing else.
+
+Decision: %s`, title)
 	category, err := callOpenAI(ctx, s.openaiAPIKey, prompt)
 	if err != nil {
-		// If categorization fails, default to "Other" and continue
 		category = "Other"
+	} else {
+		category = strings.TrimSpace(category)
+		valid := false
+		for _, allowed := range allowedCategories {
+			if category == allowed {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			category = "Other"
+		}
 	}
 
 	var slug string
