@@ -21,6 +21,13 @@ export default function CreateDecisionPage() {
     return `${window.location.origin}${sharePath}`;
   }, [sharePath]);
 
+  const creatorPath = useMemo(() => {
+    if (!sharePath) {
+      return "";
+    }
+    return `${sharePath}?creator=1`;
+  }, [sharePath]);
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsSubmitting(true);
@@ -111,7 +118,7 @@ export default function CreateDecisionPage() {
               <button className="btn btn-primary" type="button" onClick={copyLink}>
                 Copy Link
               </button>
-              <a className="btn" href={sharePath}>
+              <a className="btn" href={creatorPath}>
                 Open Decision
               </a>
             </div>

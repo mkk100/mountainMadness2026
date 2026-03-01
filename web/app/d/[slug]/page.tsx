@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { getDecision, submitDecisionResponse, voteOnDecision } from "../../../lib/api";
 import { getOrCreateViewerId, hasDecisionResponded, markDecisionResponded } from "../../../lib/viewer";
@@ -22,7 +22,9 @@ function formatDate(isoDate: string) {
 
 export default function DecisionPage() {
   const params = useParams<{ slug: string }>();
+  const searchParams = useSearchParams();
   const slug = params.slug;
+  const isCreatorView = searchParams.get("creator") === "1";
 
   const [viewerId, setViewerId] = useState<string | null>(null);
   const [data, setData] = useState<DecisionEnvelope | null>(null);
@@ -201,109 +203,120 @@ export default function DecisionPage() {
 
           <section className="grid">
             <article className="card">
-              <h2>Submit Your Response</h2>
-              {viewerHasResponded ? (
-                <p className="success">You already submitted a response for this decision.</p>
+              {isCreatorView ? (
+                <>
+                  <h2>Creator View</h2>
+                  <p className="muted">You are viewing this decision as the creator. Response form is hidden.</p>
+                </>
               ) : (
-                <form onSubmit={onSubmitResponse}>
-                  <div className="field">
-                    <label>Rating</label>
-                    <div className="rating-grid">
-                      {ratingOptions.map((option) => (
-                        <button
-                          key={option.value}
-                          className={`rating-btn ${rating === option.value ? "active" : ""}`}
-                          type="button"
-                          onClick={() => setRating(option.value)}
-                        >
-                          {option.value} · {option.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                <>
+                  <h2>Submit Your Response</h2>
+                  {viewerHasResponded ? (
+                    <p className="success">You already submitted a response for this decision.</p>
+                  ) : (
+                    <form onSubmit={onSubmitResponse}>
+                      <div className="field">
+                        <label>Rating</label>
+                        <div className="rating-grid">
+                          {ratingOptions.map((option) => (
+                            <button
+                              key={option.value}
+                              className={`rating-btn ${rating === option.value ? "active" : ""}`}
+                              type="button"
+                              onClick={() => setRating(option.value)}
+                            >
+                              {option.value} · {option.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
 
-                  <div className="field">
-                    <label>Emotional Damage Emoji</label>
-                    <div className="emoji-grid">
-                      {emojis.map((value) => (
-                        <button
-                          key={value}
-                          className={`emoji-btn ${emoji === value ? "active" : ""}`}
-                          type="button"
-                          onClick={() => setEmoji(value)}
-                        >
-                          {value}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                      <div className="field">
+                        <label>Emotional Damage Emoji</label>
+                        <div className="emoji-grid">
+                          {emojis.map((value) => (
+                            <button
+                              key={value}
+                              className={`emoji-btn ${emoji === value ? "active" : ""}`}
+                              type="button"
+                              onClick={() => setEmoji(value)}
+                            >
+                              {value}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
 
-                  <div className="field">
-                    <label htmlFor="comment">Comment (max 180)</label>
-                    <textarea
-                      id="comment"
-                      className="textarea"
-                      maxLength={180}
-                      placeholder="Drop your honest take..."
-                      value={comment}
-                      onChange={(e) => setComment(e.target.value)}
-                    />
-                    <small className="muted">{comment.length}/180</small>
-                  </div>
+                      <div className="field">
+                        <label htmlFor="comment">Comment (max 180)</label>
+                        <textarea
+                          id="comment"
+                          className="textarea"
+                          maxLength={180}
+                          placeholder="Drop your honest take..."
+                          value={comment}
+                          onChange={(e) => setComment(e.target.value)}
+                        />
+                        <small className="muted">{comment.length}/180</small>
+                      </div>
 
-                  <button className="btn btn-hot" type="submit" disabled={isSubmitting}>
-                    {isSubmitting ? "Submitting..." : "Submit Response"}
-                  </button>
-                </form>
+                      <button className="btn btn-hot" type="submit" disabled={isSubmitting}>
+                        {isSubmitting ? "Submitting..." : "Submit Response"}
+                      </button>
+                    </form>
+                  )}
+                </>
               )}
               {submitError ? <p className="error">{submitError}</p> : null}
             </article>
 
-            <article className="card">
-              <h2>Stats</h2>
-              <div className="stats-grid">
-                <div className="metric">
-                  <strong>Rating Distribution</strong>
-                  <div style={{ marginTop: 10 }}>
-                    {ratingOptions.map((option, index) => {
-                      const count = data.stats.rating_counts[index] ?? 0;
-                      const total = data.stats.response_count || 1;
-                      const width = Math.round((count / total) * 100);
-                      return (
-                        <div key={option.value} className="rating-bar">
-                          <span>{option.label}</span>
-                          <div className="rating-track">
-                            <div className="rating-fill" style={{ width: `${width}%` }} />
+            {isCreatorView ? (
+              <article className="card">
+                <h2>Stats</h2>
+                <div className="stats-grid">
+                  <div className="metric">
+                    <strong>Rating Distribution</strong>
+                    <div style={{ marginTop: 10 }}>
+                      {ratingOptions.map((option, index) => {
+                        const count = data.stats.rating_counts[index] ?? 0;
+                        const total = data.stats.response_count || 1;
+                        const width = Math.round((count / total) * 100);
+                        return (
+                          <div key={option.value} className="rating-bar">
+                            <span>{option.label}</span>
+                            <div className="rating-track">
+                              <div className="rating-fill" style={{ width: `${width}%` }} />
+                            </div>
+                            <span>{count}</span>
                           </div>
-                          <span>{count}</span>
-                        </div>
-                      );
-                    })}
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="metric">
+                    <strong>Summary</strong>
+                    <p>Responses: {data.stats.response_count}</p>
+                    <p>Avg rating: {data.stats.avg_rating.toFixed(2)}</p>
+                    <p>Net sentiment: {data.stats.net_sentiment.toFixed(2)}</p>
+                    <p>Top emoji: {data.stats.top_emoji || "—"}</p>
+                  </div>
+
+                  <div className="metric">
+                    <strong>Emoji Counts</strong>
+                    {data.stats.emoji_counts.length === 0 ? (
+                      <p className="muted">No emoji data yet.</p>
+                    ) : (
+                      data.stats.emoji_counts.map((item) => (
+                        <p key={item.emoji}>
+                          {item.emoji} × {item.count}
+                        </p>
+                      ))
+                    )}
                   </div>
                 </div>
-
-                <div className="metric">
-                  <strong>Summary</strong>
-                  <p>Responses: {data.stats.response_count}</p>
-                  <p>Avg rating: {data.stats.avg_rating.toFixed(2)}</p>
-                  <p>Net sentiment: {data.stats.net_sentiment.toFixed(2)}</p>
-                  <p>Top emoji: {data.stats.top_emoji || "—"}</p>
-                </div>
-
-                <div className="metric">
-                  <strong>Emoji Counts</strong>
-                  {data.stats.emoji_counts.length === 0 ? (
-                    <p className="muted">No emoji data yet.</p>
-                  ) : (
-                    data.stats.emoji_counts.map((item) => (
-                      <p key={item.emoji}>
-                        {item.emoji} × {item.count}
-                      </p>
-                    ))
-                  )}
-                </div>
-              </div>
-            </article>
+              </article>
+            ) : null}
 
             <article className="card">
               <h2>Responses</h2>
