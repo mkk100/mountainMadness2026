@@ -51,8 +51,8 @@ func New(db *sql.DB) nethttp.Handler {
 	r.Post("/api/decisions", s.handleCreateDecision)
 	r.Get("/api/decisions/{slug}", s.handleGetDecision)
 	r.Post("/api/decisions/{slug}/responses", s.handleCreateResponse)
-	r.Post("/api/responses/{responseID}/vote", s.handleCreateVote)
-	r.Post("/api/responses/{responseID}/votes", s.handleCreateVote)
+	r.Post("/api/decisions/{slug}/vote", s.handleDecisionVote)
+	r.Post("/api/decisions/{slug}/votes", s.handleDecisionVote)
 
 	return r
 }
@@ -211,18 +211,25 @@ type voteRequest struct {
 	Value    int    `json:"value"`
 }
 
-type voteSummaryResponse struct {
-	ResponseID string `json:"response_id"`
+type decisionVoteSummary struct {
+	Score     int `json:"score"`
+	Upvotes   int `json:"upvotes"`
+	Downvotes int `json:"downvotes"`
+	MyVote    int `json:"my_vote"`
+}
+
+type decisionVoteSummaryResponse struct {
+	DecisionID string `json:"decision_id"`
 	Score      int    `json:"score"`
 	Upvotes    int    `json:"upvotes"`
 	Downvotes  int    `json:"downvotes"`
 	MyVote     int    `json:"my_vote"`
 }
 
-func (s *Server) handleCreateVote(w nethttp.ResponseWriter, r *nethttp.Request) {
-	responseID, err := uuid.Parse(chi.URLParam(r, "responseID"))
-	if err != nil {
-		writeError(w, nethttp.StatusBadRequest, "responseID must be a valid UUID")
+func (s *Server) handleDecisionVote(w nethttp.ResponseWriter, r *nethttp.Request) {
+	slug := chi.URLParam(r, "slug")
+	if strings.TrimSpace(slug) == "" {
+		writeError(w, nethttp.StatusBadRequest, "slug is required")
 		return
 	}
 
@@ -242,19 +249,37 @@ func (s *Server) handleCreateVote(w nethttp.ResponseWriter, r *nethttp.Request) 
 		return
 	}
 
-	summary, status, err := s.toggleVote(r.Context(), responseID, viewerID, req.Value)
+	decision, err := s.findDecisionBySlug(r.Context(), slug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, nethttp.StatusNotFound, "decision not found")
+			return
+		}
+		writeError(w, nethttp.StatusInternalServerError, "failed to load decision")
+		return
+	}
+
+	summary, status, err := s.toggleDecisionVote(r.Context(), decision.ID, viewerID, req.Value)
 	if err != nil {
 		writeError(w, status, err.Error())
 		return
 	}
 
-	writeJSON(w, nethttp.StatusOK, summary)
+	writeJSON(w, nethttp.StatusOK, decisionVoteSummaryResponse{
+		DecisionID: decision.ID.String(),
+		Score:      summary.Score,
+		Upvotes:    summary.Upvotes,
+		Downvotes:  summary.Downvotes,
+		MyVote:     summary.MyVote,
+	})
 }
 
 type decisionEnvelope struct {
-	Decision  decisionView   `json:"decision"`
-	Stats     decisionStats  `json:"stats"`
-	Responses []responseCard `json:"responses"`
+	Decision           decisionView        `json:"decision"`
+	Stats              decisionStats       `json:"stats"`
+	PostVote           decisionVoteSummary `json:"post_vote"`
+	ViewerHasResponded bool                `json:"viewer_has_responded"`
+	Responses          []responseCard      `json:"responses"`
 }
 
 type decisionView struct {
@@ -286,10 +311,6 @@ type responseCard struct {
 	Emoji     string    `json:"emoji"`
 	Comment   *string   `json:"comment"`
 	CreatedAt time.Time `json:"created_at"`
-	Score     int       `json:"score"`
-	Upvotes   int       `json:"upvotes"`
-	Downvotes int       `json:"downvotes"`
-	MyVote    int       `json:"my_vote"`
 }
 
 type decisionRecord struct {
@@ -331,7 +352,19 @@ func (s *Server) handleGetDecision(w nethttp.ResponseWriter, r *nethttp.Request)
 		return
 	}
 
-	responses, err := s.loadResponseCards(ctx, decision.ID, viewerID)
+	postVote, err := s.queryDecisionVoteSummary(ctx, s.db, decision.ID, viewerID)
+	if err != nil {
+		writeError(w, nethttp.StatusInternalServerError, "failed to load post votes")
+		return
+	}
+
+	viewerHasResponded, err := s.viewerHasResponded(ctx, decision.ID, viewerID)
+	if err != nil {
+		writeError(w, nethttp.StatusInternalServerError, "failed to load viewer response state")
+		return
+	}
+
+	responses, err := s.loadResponseCards(ctx, decision.ID)
 	if err != nil {
 		writeError(w, nethttp.StatusInternalServerError, "failed to load responses")
 		return
@@ -346,8 +379,10 @@ func (s *Server) handleGetDecision(w nethttp.ResponseWriter, r *nethttp.Request)
 			ClosesAt:    decision.ClosesAt,
 			CreatedAt:   decision.CreatedAt,
 		},
-		Stats:     stats,
-		Responses: responses,
+		Stats:              stats,
+		PostVote:           postVote,
+		ViewerHasResponded: viewerHasResponded,
+		Responses:          responses,
 	}
 
 	writeJSON(w, nethttp.StatusOK, out)
@@ -444,31 +479,18 @@ func (s *Server) loadDecisionStats(ctx context.Context, decisionID uuid.UUID) (d
 	return stats, nil
 }
 
-func (s *Server) loadResponseCards(ctx context.Context, decisionID uuid.UUID, viewerID *uuid.UUID) ([]responseCard, error) {
-	var viewerParam any
-	if viewerID != nil {
-		viewerParam = *viewerID
-	} else {
-		viewerParam = nil
-	}
-
+func (s *Server) loadResponseCards(ctx context.Context, decisionID uuid.UUID) ([]responseCard, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			r.id,
 			r.rating,
 			r.emoji,
 			r.comment,
-			r.created_at,
-			COALESCE(SUM(v.value), 0)::int AS score,
-			COALESCE(COUNT(*) FILTER (WHERE v.value = 1), 0)::int AS upvotes,
-			COALESCE(COUNT(*) FILTER (WHERE v.value = -1), 0)::int AS downvotes,
-			COALESCE(MAX(CASE WHEN $2::uuid IS NOT NULL AND v.voter_viewer_id = $2::uuid THEN v.value END), 0)::int AS my_vote
+			r.created_at
 		FROM responses r
-		LEFT JOIN votes v ON v.response_id = r.id
 		WHERE r.decision_id = $1
-		GROUP BY r.id
-		ORDER BY COALESCE(SUM(v.value), 0) DESC, r.created_at DESC
-	`, decisionID, viewerParam)
+		ORDER BY r.created_at DESC
+	`, decisionID)
 	if err != nil {
 		return nil, err
 	}
@@ -484,10 +506,6 @@ func (s *Server) loadResponseCards(ctx context.Context, decisionID uuid.UUID, vi
 			&item.Emoji,
 			&item.Comment,
 			&item.CreatedAt,
-			&item.Score,
-			&item.Upvotes,
-			&item.Downvotes,
-			&item.MyVote,
 		); err != nil {
 			return nil, err
 		}
@@ -501,20 +519,27 @@ func (s *Server) loadResponseCards(ctx context.Context, decisionID uuid.UUID, vi
 	return responses, nil
 }
 
-func (s *Server) toggleVote(ctx context.Context, responseID uuid.UUID, viewerID uuid.UUID, value int) (voteSummaryResponse, int, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return voteSummaryResponse{}, nethttp.StatusInternalServerError, errors.New("failed to start vote transaction")
+func (s *Server) viewerHasResponded(ctx context.Context, decisionID uuid.UUID, viewerID *uuid.UUID) (bool, error) {
+	if viewerID == nil {
+		return false, nil
 	}
-	defer tx.Rollback()
 
 	var exists bool
-	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM responses WHERE id = $1)", responseID).Scan(&exists); err != nil {
-		return voteSummaryResponse{}, nethttp.StatusInternalServerError, errors.New("failed to check response")
+	err := s.db.QueryRowContext(
+		ctx,
+		"SELECT EXISTS(SELECT 1 FROM responses WHERE decision_id = $1 AND viewer_id = $2)",
+		decisionID,
+		*viewerID,
+	).Scan(&exists)
+	return exists, err
+}
+
+func (s *Server) toggleDecisionVote(ctx context.Context, decisionID uuid.UUID, viewerID uuid.UUID, value int) (decisionVoteSummary, int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return decisionVoteSummary{}, nethttp.StatusInternalServerError, errors.New("failed to start vote transaction")
 	}
-	if !exists {
-		return voteSummaryResponse{}, nethttp.StatusNotFound, errors.New("response not found")
-	}
+	defer tx.Rollback()
 
 	var (
 		voteID        uuid.UUID
@@ -522,67 +547,73 @@ func (s *Server) toggleVote(ctx context.Context, responseID uuid.UUID, viewerID 
 	)
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, value
-		FROM votes
-		WHERE response_id = $1 AND voter_viewer_id = $2
+		FROM decision_votes
+		WHERE decision_id = $1 AND voter_viewer_id = $2
 		FOR UPDATE
-	`, responseID, viewerID).Scan(&voteID, &existingValue)
+	`, decisionID, viewerID).Scan(&voteID, &existingValue)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return voteSummaryResponse{}, nethttp.StatusInternalServerError, errors.New("failed to load vote")
+		return decisionVoteSummary{}, nethttp.StatusInternalServerError, errors.New("failed to load vote")
 	}
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO votes (id, response_id, voter_viewer_id, value)
+			INSERT INTO decision_votes (id, decision_id, voter_viewer_id, value)
 			VALUES ($1, $2, $3, $4)
-		`, uuid.New(), responseID, viewerID, value)
+		`, uuid.New(), decisionID, viewerID, value)
 		if err != nil {
-			return voteSummaryResponse{}, nethttp.StatusInternalServerError, errors.New("failed to insert vote")
+			return decisionVoteSummary{}, nethttp.StatusInternalServerError, errors.New("failed to insert vote")
 		}
 	case existingValue == value:
 		_, err = tx.ExecContext(ctx, `
-			DELETE FROM votes
+			DELETE FROM decision_votes
 			WHERE id = $1
 		`, voteID)
 		if err != nil {
-			return voteSummaryResponse{}, nethttp.StatusInternalServerError, errors.New("failed to remove vote")
+			return decisionVoteSummary{}, nethttp.StatusInternalServerError, errors.New("failed to remove vote")
 		}
 	default:
 		_, err = tx.ExecContext(ctx, `
-			UPDATE votes
+			UPDATE decision_votes
 			SET value = $1, created_at = now()
 			WHERE id = $2
 		`, value, voteID)
 		if err != nil {
-			return voteSummaryResponse{}, nethttp.StatusInternalServerError, errors.New("failed to update vote")
+			return decisionVoteSummary{}, nethttp.StatusInternalServerError, errors.New("failed to update vote")
 		}
 	}
 
-	summary, err := queryVoteSummary(ctx, tx, responseID, viewerID)
+	summary, err := s.queryDecisionVoteSummary(ctx, tx, decisionID, &viewerID)
 	if err != nil {
-		return voteSummaryResponse{}, nethttp.StatusInternalServerError, errors.New("failed to summarize vote")
+		return decisionVoteSummary{}, nethttp.StatusInternalServerError, errors.New("failed to summarize vote")
 	}
 	if err := tx.Commit(); err != nil {
-		return voteSummaryResponse{}, nethttp.StatusInternalServerError, errors.New("failed to commit vote")
+		return decisionVoteSummary{}, nethttp.StatusInternalServerError, errors.New("failed to commit vote")
 	}
 
-	summary.ResponseID = responseID.String()
 	return summary, nethttp.StatusOK, nil
 }
 
-func queryVoteSummary(ctx context.Context, querier interface {
+func (s *Server) queryDecisionVoteSummary(ctx context.Context, querier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, responseID uuid.UUID, viewerID uuid.UUID) (voteSummaryResponse, error) {
-	var out voteSummaryResponse
+}, decisionID uuid.UUID, viewerID *uuid.UUID) (decisionVoteSummary, error) {
+	var out decisionVoteSummary
+	var viewerParam any
+	if viewerID != nil {
+		viewerParam = *viewerID
+	} else {
+		viewerParam = nil
+	}
+
 	err := querier.QueryRowContext(ctx, `
 		SELECT
 			COALESCE(SUM(value), 0)::int AS score,
 			COALESCE(COUNT(*) FILTER (WHERE value = 1), 0)::int AS upvotes,
 			COALESCE(COUNT(*) FILTER (WHERE value = -1), 0)::int AS downvotes,
-			COALESCE(MAX(CASE WHEN voter_viewer_id = $2 THEN value END), 0)::int AS my_vote
-		FROM votes
-		WHERE response_id = $1
-	`, responseID, viewerID).Scan(&out.Score, &out.Upvotes, &out.Downvotes, &out.MyVote)
+			COALESCE(MAX(CASE WHEN $2::uuid IS NOT NULL AND voter_viewer_id = $2::uuid THEN value END), 0)::int AS my_vote
+		FROM decision_votes
+		WHERE decision_id = $1
+	`, decisionID, viewerParam).Scan(&out.Score, &out.Upvotes, &out.Downvotes, &out.MyVote)
 	return out, err
 }
 

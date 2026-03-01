@@ -59,7 +59,7 @@ export default function CreateDecisionPage() {
       <section className="banner">
         <h1 className="title">RateMyLifeDecision</h1>
         <p className="subtitle">
-          Create one life decision, share one link, let friends rate emotional damage and vote on comments.
+          Create one life decision, share one link, let friends rate emotional damage, comment, and vote on the post.
         </p>
       </section>
 

@@ -2,8 +2,8 @@
 
 import { useParams } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { getDecision, submitDecisionResponse, voteOnResponse } from "../../../lib/api";
-import { getOrCreateViewerId } from "../../../lib/viewer";
+import { getDecision, submitDecisionResponse, voteOnDecision } from "../../../lib/api";
+import { getOrCreateViewerId, hasDecisionResponded, markDecisionResponded } from "../../../lib/viewer";
 import type { DecisionEnvelope } from "../../../lib/types";
 
 const ratingOptions = [
@@ -30,7 +30,9 @@ export default function DecisionPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [votingId, setVotingId] = useState<string | null>(null);
+  const [isVotingPost, setIsVotingPost] = useState(false);
+  const [submittedThisSession, setSubmittedThisSession] = useState(false);
+  const [persistedResponded, setPersistedResponded] = useState(false);
 
   const [rating, setRating] = useState<number | null>(null);
   const [emoji, setEmoji] = useState<string>("");
@@ -39,6 +41,13 @@ export default function DecisionPage() {
   useEffect(() => {
     setViewerId(getOrCreateViewerId());
   }, []);
+
+  useEffect(() => {
+    if (!slug) {
+      return;
+    }
+    setPersistedResponded(hasDecisionResponded(slug));
+  }, [slug]);
 
   async function refreshDecision(currentViewerId?: string) {
     setLoading(true);
@@ -62,14 +71,28 @@ export default function DecisionPage() {
 
   const sortedResponses = useMemo(() => {
     const responses = [...(data?.responses ?? [])];
-    responses.sort((a, b) => {
-      if (b.score !== a.score) {
-        return b.score - a.score;
-      }
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-    });
+    responses.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
     return responses;
   }, [data?.responses]);
+
+  const postVote = data?.post_vote ?? {
+    score: 0,
+    upvotes: 0,
+    downvotes: 0,
+    my_vote: 0
+  };
+  const supportsPostVote = Boolean((data as { post_vote?: unknown } | null)?.post_vote);
+  const viewerHasRespondedFromResponses = Boolean(
+    viewerId &&
+      (data?.responses as Array<{ viewer_id?: string }> | undefined)?.some(
+        (response) => response.viewer_id === viewerId
+      )
+  );
+  const viewerHasResponded =
+    (data?.viewer_has_responded ?? false) ||
+    submittedThisSession ||
+    persistedResponded ||
+    viewerHasRespondedFromResponses;
 
   async function onSubmitResponse(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -96,28 +119,45 @@ export default function DecisionPage() {
         comment: comment.trim() || null
       });
 
+      setRating(null);
+      setEmoji("");
       setComment("");
+      setSubmittedThisSession(true);
+      markDecisionResponded(slug);
+      setPersistedResponded(true);
       await refreshDecision(viewerId);
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Failed to submit response");
+      const message = err instanceof Error ? err.message : "Failed to submit response";
+      setSubmitError(message);
+      if (message.includes("already submitted")) {
+        setSubmittedThisSession(true);
+        markDecisionResponded(slug);
+        setPersistedResponded(true);
+        await refreshDecision(viewerId);
+      }
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  async function onVote(responseId: string, value: 1 | -1) {
+  async function onVotePost(value: 1 | -1) {
     if (!viewerId) {
       return;
     }
 
-    setVotingId(responseId);
+    setIsVotingPost(true);
     try {
-      await voteOnResponse(responseId, { viewer_id: viewerId, value });
+      await voteOnDecision(slug, { viewer_id: viewerId, value });
       await refreshDecision(viewerId);
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Failed to vote");
+      const message = err instanceof Error ? err.message : "Failed to vote";
+      if (message.includes("404")) {
+        setSubmitError("Post voting endpoint not found. Restart backend with latest code and rerun migrations.");
+      } else {
+        setSubmitError(message);
+      }
     } finally {
-      setVotingId(null);
+      setIsVotingPost(false);
     }
   }
 
@@ -135,61 +175,87 @@ export default function DecisionPage() {
               Created: {formatDate(data.decision.created_at)}
               {data.decision.closes_at ? ` • Closes: ${formatDate(data.decision.closes_at)}` : ""}
             </p>
+            <div className="vote-row">
+              <button
+                className={`vote-btn ${postVote.my_vote === 1 ? "active-up" : ""}`}
+                type="button"
+                disabled={isVotingPost || !supportsPostVote}
+                onClick={() => onVotePost(1)}
+              >
+                ▲ {postVote.upvotes}
+              </button>
+              <button
+                className={`vote-btn ${postVote.my_vote === -1 ? "active-down" : ""}`}
+                type="button"
+                disabled={isVotingPost || !supportsPostVote}
+                onClick={() => onVotePost(-1)}
+              >
+                ▼ {postVote.downvotes}
+              </button>
+              <strong>Post Score: {postVote.score}</strong>
+            </div>
+            {!supportsPostVote ? (
+              <p className="muted">Post voting unavailable on current backend version. Restart backend after migration.</p>
+            ) : null}
           </section>
 
           <section className="grid">
             <article className="card">
               <h2>Submit Your Response</h2>
-              <form onSubmit={onSubmitResponse}>
-                <div className="field">
-                  <label>Rating</label>
-                  <div className="rating-grid">
-                    {ratingOptions.map((option) => (
-                      <button
-                        key={option.value}
-                        className={`rating-btn ${rating === option.value ? "active" : ""}`}
-                        type="button"
-                        onClick={() => setRating(option.value)}
-                      >
-                        {option.value} · {option.label}
-                      </button>
-                    ))}
+              {viewerHasResponded ? (
+                <p className="success">You already submitted a response for this decision.</p>
+              ) : (
+                <form onSubmit={onSubmitResponse}>
+                  <div className="field">
+                    <label>Rating</label>
+                    <div className="rating-grid">
+                      {ratingOptions.map((option) => (
+                        <button
+                          key={option.value}
+                          className={`rating-btn ${rating === option.value ? "active" : ""}`}
+                          type="button"
+                          onClick={() => setRating(option.value)}
+                        >
+                          {option.value} · {option.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
 
-                <div className="field">
-                  <label>Emotional Damage Emoji</label>
-                  <div className="emoji-grid">
-                    {emojis.map((value) => (
-                      <button
-                        key={value}
-                        className={`emoji-btn ${emoji === value ? "active" : ""}`}
-                        type="button"
-                        onClick={() => setEmoji(value)}
-                      >
-                        {value}
-                      </button>
-                    ))}
+                  <div className="field">
+                    <label>Emotional Damage Emoji</label>
+                    <div className="emoji-grid">
+                      {emojis.map((value) => (
+                        <button
+                          key={value}
+                          className={`emoji-btn ${emoji === value ? "active" : ""}`}
+                          type="button"
+                          onClick={() => setEmoji(value)}
+                        >
+                          {value}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
 
-                <div className="field">
-                  <label htmlFor="comment">Comment (max 180)</label>
-                  <textarea
-                    id="comment"
-                    className="textarea"
-                    maxLength={180}
-                    placeholder="Drop your honest take..."
-                    value={comment}
-                    onChange={(e) => setComment(e.target.value)}
-                  />
-                  <small className="muted">{comment.length}/180</small>
-                </div>
+                  <div className="field">
+                    <label htmlFor="comment">Comment (max 180)</label>
+                    <textarea
+                      id="comment"
+                      className="textarea"
+                      maxLength={180}
+                      placeholder="Drop your honest take..."
+                      value={comment}
+                      onChange={(e) => setComment(e.target.value)}
+                    />
+                    <small className="muted">{comment.length}/180</small>
+                  </div>
 
-                <button className="btn btn-hot" type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? "Submitting..." : "Submit Response"}
-                </button>
-              </form>
+                  <button className="btn btn-hot" type="submit" disabled={isSubmitting}>
+                    {isSubmitting ? "Submitting..." : "Submit Response"}
+                  </button>
+                </form>
+              )}
               {submitError ? <p className="error">{submitError}</p> : null}
             </article>
 
@@ -253,26 +319,6 @@ export default function DecisionPage() {
                     </div>
 
                     {response.comment ? <p>{response.comment}</p> : <p className="muted">No comment.</p>}
-
-                    <div className="vote-row">
-                      <button
-                        className={`vote-btn ${response.my_vote === 1 ? "active-up" : ""}`}
-                        type="button"
-                        disabled={votingId === response.id}
-                        onClick={() => onVote(response.id, 1)}
-                      >
-                        ▲ {response.upvotes}
-                      </button>
-                      <button
-                        className={`vote-btn ${response.my_vote === -1 ? "active-down" : ""}`}
-                        type="button"
-                        disabled={votingId === response.id}
-                        onClick={() => onVote(response.id, -1)}
-                      >
-                        ▼ {response.downvotes}
-                      </button>
-                      <strong>Score: {response.score}</strong>
-                    </div>
                   </div>
                 ))}
               </div>

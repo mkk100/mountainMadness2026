@@ -66,8 +66,8 @@ export function submitDecisionResponse(slug: string, payload: SubmitResponseRequ
   });
 }
 
-export function voteOnResponse(responseId: string, payload: VoteRequest) {
-  return request<VoteSummary>(`/api/responses/${encodeURIComponent(responseId)}/vote`, {
+export function voteOnDecision(slug: string, payload: VoteRequest) {
+  return request<VoteSummary>(`/api/decisions/${encodeURIComponent(slug)}/vote`, {
     method: "POST",
     body: JSON.stringify(payload)
   });

@@ -19,6 +19,13 @@ export type DecisionEnvelope = {
     closes_at: string | null;
     created_at: string;
   };
+  post_vote: {
+    score: number;
+    upvotes: number;
+    downvotes: number;
+    my_vote: number;
+  };
+  viewer_has_responded: boolean;
   stats: {
     response_count: number;
     rating_counts: number[];
@@ -36,10 +43,6 @@ export type DecisionEnvelope = {
     emoji: string;
     comment: string | null;
     created_at: string;
-    score: number;
-    upvotes: number;
-    downvotes: number;
-    my_vote: number;
   }>;
 };
 
@@ -56,7 +59,7 @@ export type VoteRequest = {
 };
 
 export type VoteSummary = {
-  response_id: string;
+  decision_id: string;
   score: number;
   upvotes: number;
   downvotes: number;

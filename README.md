@@ -58,12 +58,12 @@ Copy `.env.example` values into your shell environment as needed:
 - `POST /api/decisions`
 - `GET /api/decisions/{slug}?viewer_id=<uuid>`
 - `POST /api/decisions/{slug}/responses`
-- `POST /api/responses/{responseID}/vote`
+- `POST /api/decisions/{slug}/vote`
 
 ## Frontend Routes
 
 - `/` Create Decision page (generate share link + copy button)
-- `/d/{slug}` Decision page (submit response, view stats, vote on responses)
+- `/d/{slug}` Decision page (submit one response, view stats/comments, vote on post)
 
 ## Example Requests
 
@@ -98,10 +98,10 @@ curl -X POST http://localhost:8080/api/decisions/<slug>/responses \
   }'
 ```
 
-Vote on a response:
+Vote on the decision post:
 
 ```bash
-curl -X POST http://localhost:8080/api/responses/<response-id>/vote \
+curl -X POST http://localhost:8080/api/decisions/<slug>/vote \
   -H "Content-Type: application/json" \
   -d '{
     "viewer_id": "992f80ff-d9d8-47fd-97c0-c140aeb5232a",
