@@ -25,12 +25,25 @@ export type DecisionEnvelope = {
     downvotes: number;
     my_vote: number;
   };
+  recommendation: {
+    decision: "yes" | "no";
+    score: number;
+    suggestion_score: number;
+    rating_score: number;
+    comment_sentiment: number;
+    post_vote_score: number;
+  };
   viewer_has_responded: boolean;
   stats: {
     response_count: number;
     rating_counts: number[];
     avg_rating: number;
     net_sentiment: number;
+    categories: {
+      do_it: number;
+      dont_do_it: number;
+      mixed: number;
+    };
     emoji_counts: Array<{
       emoji: string;
       count: number;
@@ -40,6 +53,7 @@ export type DecisionEnvelope = {
   responses: Array<{
     id: string;
     rating: number;
+    suggestion: 1 | 2 | 3;
     emoji: string;
     comment: string | null;
     created_at: string;
@@ -49,6 +63,7 @@ export type DecisionEnvelope = {
 export type SubmitResponseRequest = {
   viewer_id: string;
   rating: number;
+  suggestion: 1 | 2 | 3;
   emoji: string;
   comment: string | null;
 };

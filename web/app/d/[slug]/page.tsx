@@ -2,8 +2,16 @@
 
 import { useParams, useSearchParams } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { getDecision, submitDecisionResponse, voteOnDecision } from "../../../lib/api";
-import { getOrCreateViewerId, hasDecisionResponded, markDecisionResponded } from "../../../lib/viewer";
+import {
+  getDecision,
+  submitDecisionResponse,
+  voteOnDecision,
+} from "../../../lib/api";
+import {
+  getOrCreateViewerId,
+  hasDecisionResponded,
+  markDecisionResponded,
+} from "../../../lib/viewer";
 import type { DecisionEnvelope } from "../../../lib/types";
 
 const ratingOptions = [
@@ -11,10 +19,17 @@ const ratingOptions = [
   { value: 2, label: "Bad" },
   { value: 3, label: "Neutral" },
   { value: 4, label: "Good" },
-  { value: 5, label: "Great" }
+  { value: 5, label: "Great" },
 ] as const;
 
-const emojis = ["😭", "😬", "🧨", "🤡", "🫡", "🧠", "🔥", "🥶", "❤️", "🫠"] as const;
+const decisionOptions = [
+  { value: 1, label: "Don't do it" },
+  { value: 2, label: "Mixed" },
+  { value: 3, label: "Do it" },
+] as const;
+
+const emojis = ["🫠", "😭", "😬", "😄", "🫡"] as const;
+type DecisionOption = 1 | 2 | 3;
 
 function formatDate(isoDate: string) {
   return new Date(isoDate).toLocaleString();
@@ -36,7 +51,9 @@ export default function DecisionPage() {
   const [submittedThisSession, setSubmittedThisSession] = useState(false);
   const [persistedResponded, setPersistedResponded] = useState(false);
 
-  const [rating, setRating] = useState<number | null>(null);
+  const [decisionOption, setDecisionOption] = useState<DecisionOption | null>(
+    null,
+  );
   const [emoji, setEmoji] = useState<string>("");
   const [comment, setComment] = useState("");
 
@@ -73,7 +90,10 @@ export default function DecisionPage() {
 
   const sortedResponses = useMemo(() => {
     const responses = [...(data?.responses ?? [])];
-    responses.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    responses.sort(
+      (a, b) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+    );
     return responses;
   }, [data?.responses]);
 
@@ -81,14 +101,27 @@ export default function DecisionPage() {
     score: 0,
     upvotes: 0,
     downvotes: 0,
-    my_vote: 0
+    my_vote: 0,
   };
-  const supportsPostVote = Boolean((data as { post_vote?: unknown } | null)?.post_vote);
+  const recommendation = data?.recommendation ?? {
+    decision: "no",
+    score: 0,
+    suggestion_score: 0,
+    rating_score: 0,
+    comment_sentiment: 0,
+    post_vote_score: 0,
+  };
+  const supportsPostVote = Boolean(
+    (data as { post_vote?: unknown } | null)?.post_vote,
+  );
+  const supportsRecommendation = Boolean(
+    (data as { recommendation?: unknown } | null)?.recommendation,
+  );
   const viewerHasRespondedFromResponses = Boolean(
     viewerId &&
-      (data?.responses as Array<{ viewer_id?: string }> | undefined)?.some(
-        (response) => response.viewer_id === viewerId
-      )
+    (data?.responses as Array<{ viewer_id?: string }> | undefined)?.some(
+      (response) => response.viewer_id === viewerId,
+    ),
   );
   const viewerHasResponded =
     (data?.viewer_has_responded ?? false) ||
@@ -103,8 +136,8 @@ export default function DecisionPage() {
     }
 
     setSubmitError(null);
-    if (!rating) {
-      setSubmitError("Choose a rating.");
+    if (!decisionOption) {
+      setSubmitError("Choose Do it, Don't do it, or Mixed.");
       return;
     }
     if (!emoji) {
@@ -116,12 +149,13 @@ export default function DecisionPage() {
     try {
       await submitDecisionResponse(slug, {
         viewer_id: viewerId,
-        rating,
+        rating: 0,
+        suggestion: decisionOption,
         emoji,
-        comment: comment.trim() || null
+        comment: comment.trim() || null,
       });
 
-      setRating(null);
+      setDecisionOption(null);
       setEmoji("");
       setComment("");
       setSubmittedThisSession(true);
@@ -129,7 +163,8 @@ export default function DecisionPage() {
       setPersistedResponded(true);
       await refreshDecision(viewerId);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to submit response";
+      const message =
+        err instanceof Error ? err.message : "Failed to submit response";
       setSubmitError(message);
       if (message.includes("already submitted")) {
         setSubmittedThisSession(true);
@@ -154,7 +189,9 @@ export default function DecisionPage() {
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to vote";
       if (message.includes("404")) {
-        setSubmitError("Post voting endpoint not found. Restart backend with latest code and rerun migrations.");
+        setSubmitError(
+          "Post voting endpoint not found. Restart backend with latest code and rerun migrations.",
+        );
       } else {
         setSubmitError(message);
       }
@@ -172,10 +209,14 @@ export default function DecisionPage() {
         <>
           <section className="banner">
             <h1 className="title">{data.decision.title}</h1>
-            {data.decision.description ? <p className="subtitle">{data.decision.description}</p> : null}
+            {data.decision.description ? (
+              <p className="subtitle">{data.decision.description}</p>
+            ) : null}
             <p className="subtitle">
               Created: {formatDate(data.decision.created_at)}
-              {data.decision.closes_at ? ` • Closes: ${formatDate(data.decision.closes_at)}` : ""}
+              {data.decision.closes_at
+                ? ` • Closes: ${formatDate(data.decision.closes_at)}`
+                : ""}
             </p>
             <div className="vote-row">
               <button
@@ -197,7 +238,10 @@ export default function DecisionPage() {
               <strong>Post Score: {postVote.score}</strong>
             </div>
             {!supportsPostVote ? (
-              <p className="muted">Post voting unavailable on current backend version. Restart backend after migration.</p>
+              <p className="muted">
+                Post voting unavailable on current backend version. Restart
+                backend after migration.
+              </p>
             ) : null}
           </section>
 
@@ -206,33 +250,38 @@ export default function DecisionPage() {
               {isCreatorView ? (
                 <>
                   <h2>Creator View</h2>
-                  <p className="muted">You are viewing this decision as the creator. Response form is hidden.</p>
+                  <p className="muted">
+                    You are viewing this decision as the creator. Response form
+                    is hidden.
+                  </p>
                 </>
               ) : (
                 <>
                   <h2>Submit Your Response</h2>
                   {viewerHasResponded ? (
-                    <p className="success">You already submitted a response for this decision.</p>
+                    <p className="success">
+                      You already submitted a response for this decision.
+                    </p>
                   ) : (
                     <form onSubmit={onSubmitResponse}>
                       <div className="field">
-                        <label>Rating</label>
+                        <label>Your Suggestion</label>
                         <div className="rating-grid">
-                          {ratingOptions.map((option) => (
+                          {decisionOptions.map((option) => (
                             <button
                               key={option.value}
-                              className={`rating-btn ${rating === option.value ? "active" : ""}`}
+                              className={`rating-btn ${decisionOption === option.value ? "active" : ""}`}
                               type="button"
-                              onClick={() => setRating(option.value)}
+                              onClick={() => setDecisionOption(option.value)}
                             >
-                              {option.value} · {option.label}
+                              {option.label}
                             </button>
                           ))}
                         </div>
                       </div>
 
                       <div className="field">
-                        <label>Emotional Damage Emoji</label>
+                        <label>Emoji</label>
                         <div className="emoji-grid">
                           {emojis.map((value) => (
                             <button
@@ -260,7 +309,11 @@ export default function DecisionPage() {
                         <small className="muted">{comment.length}/180</small>
                       </div>
 
-                      <button className="btn btn-hot" type="submit" disabled={isSubmitting}>
+                      <button
+                        className="btn btn-hot"
+                        type="submit"
+                        disabled={isSubmitting}
+                      >
                         {isSubmitting ? "Submitting..." : "Submit Response"}
                       </button>
                     </form>
@@ -285,7 +338,10 @@ export default function DecisionPage() {
                           <div key={option.value} className="rating-bar">
                             <span>{option.label}</span>
                             <div className="rating-track">
-                              <div className="rating-fill" style={{ width: `${width}%` }} />
+                              <div
+                                className="rating-fill"
+                                style={{ width: `${width}%` }}
+                              />
                             </div>
                             <span>{count}</span>
                           </div>
@@ -296,10 +352,25 @@ export default function DecisionPage() {
 
                   <div className="metric">
                     <strong>Summary</strong>
+                    {supportsRecommendation ? (
+                      <>
+                        <p>
+                          Model recommendation:{" "}
+                          {recommendation.decision === "yes" ? "Yes" : "No"}
+                        </p>
+                      </>
+                    ) : (
+                      <p className="muted">
+                        Model recommendation unavailable on current backend
+                        version.
+                      </p>
+                    )}
                     <p>Responses: {data.stats.response_count}</p>
                     <p>Avg rating: {data.stats.avg_rating.toFixed(2)}</p>
-                    <p>Net sentiment: {data.stats.net_sentiment.toFixed(2)}</p>
                     <p>Top emoji: {data.stats.top_emoji || "—"}</p>
+                    <p>Do it: {data.stats.categories.do_it}</p>
+                    <p>Don't do it: {data.stats.categories.dont_do_it}</p>
+                    <p>Mixed: {data.stats.categories.mixed}</p>
                   </div>
 
                   <div className="metric">
@@ -320,18 +391,31 @@ export default function DecisionPage() {
 
             <article className="card">
               <h2>Responses</h2>
-              {sortedResponses.length === 0 ? <p className="muted">No responses yet.</p> : null}
+              {sortedResponses.length === 0 ? (
+                <p className="muted">No responses yet.</p>
+              ) : null}
               <div className="response-list">
                 {sortedResponses.map((response) => (
                   <div key={response.id} className="response-card">
                     <div className="response-head">
                       <strong>
-                        {response.emoji} {ratingOptions.find((item) => item.value === response.rating)?.label}
+                        {response.emoji}{" "}
+                        {
+                          ratingOptions.find(
+                            (item) => item.value === response.rating,
+                          )?.label
+                        }
                       </strong>
-                      <small className="muted">{formatDate(response.created_at)}</small>
+                      <small className="muted">
+                        {formatDate(response.created_at)}
+                      </small>
                     </div>
 
-                    {response.comment ? <p>{response.comment}</p> : <p className="muted">No comment.</p>}
+                    {response.comment ? (
+                      <p>{response.comment}</p>
+                    ) : (
+                      <p className="muted">No comment.</p>
+                    )}
                   </div>
                 ))}
               </div>
