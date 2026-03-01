@@ -62,6 +62,9 @@ If your laptop already uses Postgres on `5432`, change `POSTGRES_HOST_PORT` in `
 - `POSTGRES_PASSWORD`
 - `POSTGRES_HOST_PORT`
 - `DATABASE_URL` (must match `POSTGRES_HOST_PORT`)
+- `CORS_ALLOWED_ORIGINS` (comma-separated allowlist; defaults to localhost frontend origins)
+- `TRUST_PROXY_HEADERS` (`true` when running behind a trusted proxy that sets real client IP headers)
+- `WRITE_API_KEYS` (optional comma-separated keys for write-endpoint key rotation; keep empty for local public writes)
 - Frontend env: copy `web/.env.example` to `web/.env.local` if needed.
 
 ## Endpoints
@@ -104,7 +107,8 @@ curl -X POST http://localhost:8080/api/decisions/<slug>/responses \
   -H "Content-Type: application/json" \
   -d '{
     "viewer_id": "9e3d295a-9dd7-4e04-9385-d6aa0b4ce3f2",
-    "rating": 4,
+    "rating": 0,
+    "suggestion": 3,
     "emoji": "😬",
     "comment": "Do it if you can handle the rent"
   }'

@@ -9,8 +9,12 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	nethttp "net/http"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -22,12 +26,22 @@ import (
 
 const (
 	slugMaxAttempts            = 8
+	slugMaxLength              = 128
+	titleMinLength             = 4
+	titleMaxLength             = 100
+	descriptionMaxLength       = 500
 	maxCommentLength           = 180
+	maxCreateDecisionBodyBytes = 4 * 1024
+	maxResponseBodyBytes       = 4 * 1024
+	maxVoteBodyBytes           = 2 * 1024
 	suggestionWeight           = 0.35
 	ratingWeight               = 0.30
 	commentSentimentWeight     = 0.20
 	postVoteWeight             = 0.15
 	recommendationYesThreshold = 0.0
+	ipRateLimitPerMinute       = 120
+	viewerRateLimitPerMinute   = 60
+	rateLimitWindow            = time.Minute
 )
 
 var emojiRatings = map[string]int{
@@ -83,20 +97,55 @@ var negativeSentimentWords = map[string]struct{}{
 }
 
 type Server struct {
-	db *sql.DB
+	db                *sql.DB
+	ipLimiter         *fixedWindowLimiter
+	viewerLimiter     *fixedWindowLimiter
+	allowedOrigins    map[string]struct{}
+	allowAnyOrigin    bool
+	trustProxyHeaders bool
+	writeAPIKeys      map[string]struct{}
+}
+
+type rateWindowCounter struct {
+	count   int
+	resetAt time.Time
+}
+
+type fixedWindowLimiter struct {
+	mu          sync.Mutex
+	window      time.Duration
+	limit       int
+	buckets     map[string]rateWindowCounter
+	lastCleanup time.Time
 }
 
 func New(db *sql.DB) nethttp.Handler {
-	s := &Server{db: db}
+	allowedOrigins, allowAnyOrigin := loadAllowedOriginsFromEnv()
+	s := &Server{
+		db:                db,
+		ipLimiter:         newFixedWindowLimiter(ipRateLimitPerMinute, rateLimitWindow),
+		viewerLimiter:     newFixedWindowLimiter(viewerRateLimitPerMinute, rateLimitWindow),
+		allowedOrigins:    allowedOrigins,
+		allowAnyOrigin:    allowAnyOrigin,
+		trustProxyHeaders: parseBoolEnv("TRUST_PROXY_HEADERS", false),
+		writeAPIKeys:      loadAPIKeysFromEnv("WRITE_API_KEYS"),
+	}
 	r := chi.NewRouter()
+	r.Use(s.securityHeadersMiddleware)
 	r.Use(s.corsMiddleware)
+	r.Use(s.rateLimitMiddleware)
 
 	r.Get("/health", s.handleHealth)
-	r.Post("/api/decisions", s.handleCreateDecision)
 	r.Get("/api/decisions/{slug}", s.handleGetDecision)
-	r.Post("/api/decisions/{slug}/responses", s.handleCreateResponse)
-	r.Post("/api/decisions/{slug}/vote", s.handleDecisionVote)
-	r.Post("/api/decisions/{slug}/votes", s.handleDecisionVote)
+	r.Group(func(r chi.Router) {
+		// Optional API key auth for write routes supports key rotation:
+		// provide one or more comma-separated keys via WRITE_API_KEYS.
+		r.Use(s.requireWriteAPIKeyMiddleware)
+		r.Post("/api/decisions", s.handleCreateDecision)
+		r.Post("/api/decisions/{slug}/responses", s.handleCreateResponse)
+		r.Post("/api/decisions/{slug}/vote", s.handleDecisionVote)
+		r.Post("/api/decisions/{slug}/votes", s.handleDecisionVote)
+	})
 
 	return r
 }
@@ -119,14 +168,24 @@ type createDecisionResponse struct {
 
 func (s *Server) handleCreateDecision(w nethttp.ResponseWriter, r *nethttp.Request) {
 	var req createDecisionRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, maxCreateDecisionBodyBytes, &req); err != nil {
 		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
 
-	title := strings.TrimSpace(req.Title)
-	if length := utf8.RuneCountInString(title); length < 4 || length > 100 {
-		writeError(w, nethttp.StatusBadRequest, "title must be between 4 and 100 characters")
+	title, err := normalizeRequiredText(req.Title, titleMinLength, titleMaxLength, "title", false)
+	if err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	description, err := normalizeOptionalText(req.Description, descriptionMaxLength, "description", true)
+	if err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	closesAt, err := normalizeClosesAt(req.ClosesAt)
+	if err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -146,8 +205,8 @@ func (s *Server) handleCreateDecision(w nethttp.ResponseWriter, r *nethttp.Reque
 			decisionID,
 			slug,
 			title,
-			req.Description,
-			req.ClosesAt,
+			description,
+			closesAt,
 		)
 		if err == nil {
 			writeJSON(w, nethttp.StatusCreated, createDecisionResponse{
@@ -178,21 +237,24 @@ type decisionResponsePayload struct {
 }
 
 func (s *Server) handleCreateResponse(w nethttp.ResponseWriter, r *nethttp.Request) {
-	slug := chi.URLParam(r, "slug")
-	if strings.TrimSpace(slug) == "" {
-		writeError(w, nethttp.StatusBadRequest, "slug is required")
-		return
-	}
-
-	var req decisionResponsePayload
-	if err := decodeJSON(r, &req); err != nil {
+	slug, err := normalizeSlugParam(chi.URLParam(r, "slug"))
+	if err != nil {
 		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
 
-	viewerID, err := uuid.Parse(req.ViewerID)
+	var req decisionResponsePayload
+	if err := decodeJSON(w, r, maxResponseBodyBytes, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+
+	viewerID, err := uuid.Parse(strings.TrimSpace(req.ViewerID))
 	if err != nil {
 		writeError(w, nethttp.StatusBadRequest, "viewer_id must be a valid UUID")
+		return
+	}
+	if !s.allowViewerRequest(w, viewerID.String()) {
 		return
 	}
 	if req.Suggestion < 1 || req.Suggestion > 3 {
@@ -278,21 +340,24 @@ type decisionVoteSummaryResponse struct {
 }
 
 func (s *Server) handleDecisionVote(w nethttp.ResponseWriter, r *nethttp.Request) {
-	slug := chi.URLParam(r, "slug")
-	if strings.TrimSpace(slug) == "" {
-		writeError(w, nethttp.StatusBadRequest, "slug is required")
-		return
-	}
-
-	var req voteRequest
-	if err := decodeJSON(r, &req); err != nil {
+	slug, err := normalizeSlugParam(chi.URLParam(r, "slug"))
+	if err != nil {
 		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
 
-	viewerID, err := uuid.Parse(req.ViewerID)
+	var req voteRequest
+	if err := decodeJSON(w, r, maxVoteBodyBytes, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+
+	viewerID, err := uuid.Parse(strings.TrimSpace(req.ViewerID))
 	if err != nil {
 		writeError(w, nethttp.StatusBadRequest, "viewer_id must be a valid UUID")
+		return
+	}
+	if !s.allowViewerRequest(w, viewerID.String()) {
 		return
 	}
 	if req.Value != -1 && req.Value != 1 {
@@ -392,9 +457,13 @@ type decisionRecord struct {
 }
 
 func (s *Server) handleGetDecision(w nethttp.ResponseWriter, r *nethttp.Request) {
-	slug := chi.URLParam(r, "slug")
-	if strings.TrimSpace(slug) == "" {
-		writeError(w, nethttp.StatusBadRequest, "slug is required")
+	slug, err := normalizeSlugParam(chi.URLParam(r, "slug"))
+	if err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validateDecisionQueryParams(r); err != nil {
+		writeError(w, nethttp.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -402,6 +471,9 @@ func (s *Server) handleGetDecision(w nethttp.ResponseWriter, r *nethttp.Request)
 	viewerID, err := parseViewerIDQuery(r)
 	if err != nil {
 		writeError(w, nethttp.StatusBadRequest, err.Error())
+		return
+	}
+	if viewerID != nil && !s.allowViewerRequest(w, viewerID.String()) {
 		return
 	}
 
@@ -487,7 +559,15 @@ func (s *Server) findDecisionBySlug(ctx context.Context, slug string) (decisionR
 }
 
 func parseViewerIDQuery(r *nethttp.Request) (*uuid.UUID, error) {
-	raw := strings.TrimSpace(r.URL.Query().Get("viewer_id"))
+	values, exists := r.URL.Query()["viewer_id"]
+	if !exists || len(values) == 0 {
+		return nil, nil
+	}
+	if len(values) > 1 {
+		return nil, errors.New("viewer_id query param must appear only once")
+	}
+
+	raw := strings.TrimSpace(values[0])
 	if raw == "" {
 		return nil, nil
 	}
@@ -861,9 +941,12 @@ func normalizeComment(comment *string) (*string, error) {
 		return nil, nil
 	}
 
-	trimmed := strings.TrimSpace(*comment)
+	trimmed := strings.TrimSpace(normalizeLineBreaks(*comment))
 	if trimmed == "" {
 		return nil, nil
+	}
+	if containsDisallowedControlChars(trimmed, true) {
+		return nil, errors.New("comment contains unsupported control characters")
 	}
 	if utf8.RuneCountInString(trimmed) > maxCommentLength {
 		return nil, fmt.Errorf("comment must be %d characters or fewer", maxCommentLength)
@@ -882,13 +965,40 @@ func clamp(value, minValue, maxValue float64) float64 {
 	return value
 }
 
+func (s *Server) securityHeadersMiddleware(next nethttp.Handler) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) corsMiddleware(next nethttp.Handler) nethttp.Handler {
 	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin != "" && s.isOriginAllowed(origin) {
+			if s.allowAnyOrigin {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Add("Vary", "Origin")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
+			w.Header().Set("Access-Control-Max-Age", "300")
+		}
 
 		if r.Method == nethttp.MethodOptions {
+			if origin != "" && !s.isOriginAllowed(origin) {
+				writeError(w, nethttp.StatusForbidden, "origin not allowed")
+				return
+			}
 			w.WriteHeader(nethttp.StatusNoContent)
 			return
 		}
@@ -897,11 +1007,325 @@ func (s *Server) corsMiddleware(next nethttp.Handler) nethttp.Handler {
 	})
 }
 
-func decodeJSON(r *nethttp.Request, out any) error {
+func (s *Server) rateLimitMiddleware(next nethttp.Handler) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if r.Method == nethttp.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		clientIP := s.clientIPFromRequest(r)
+		allowed, retryAfter := s.ipLimiter.Allow("ip:"+clientIP, time.Now())
+		if !allowed {
+			writeRateLimitExceeded(w, retryAfter)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requireWriteAPIKeyMiddleware(next nethttp.Handler) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if len(s.writeAPIKeys) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		apiKey := strings.TrimSpace(r.Header.Get("X-API-Key"))
+		if apiKey == "" {
+			writeError(w, nethttp.StatusUnauthorized, "missing API key")
+			return
+		}
+		if _, ok := s.writeAPIKeys[apiKey]; !ok {
+			writeError(w, nethttp.StatusUnauthorized, "invalid API key")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) allowViewerRequest(w nethttp.ResponseWriter, viewerID string) bool {
+	allowed, retryAfter := s.viewerLimiter.Allow("viewer:"+viewerID, time.Now())
+	if !allowed {
+		writeRateLimitExceeded(w, retryAfter)
+		return false
+	}
+	return true
+}
+
+func writeRateLimitExceeded(w nethttp.ResponseWriter, retryAfter time.Duration) {
+	seconds := int(retryAfter.Seconds())
+	if retryAfter > 0 && seconds == 0 {
+		seconds = 1
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeJSON(w, nethttp.StatusTooManyRequests, map[string]any{
+		"error":               "rate limit exceeded",
+		"retry_after_seconds": seconds,
+	})
+}
+
+func newFixedWindowLimiter(limit int, window time.Duration) *fixedWindowLimiter {
+	return &fixedWindowLimiter{
+		window:      window,
+		limit:       limit,
+		buckets:     make(map[string]rateWindowCounter, 2048),
+		lastCleanup: time.Now(),
+	}
+}
+
+func (l *fixedWindowLimiter) Allow(key string, now time.Time) (bool, time.Duration) {
+	if l.limit <= 0 {
+		return true, 0
+	}
+	if key == "" {
+		key = "unknown"
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if now.Sub(l.lastCleanup) >= l.window {
+		for k, bucket := range l.buckets {
+			if !now.Before(bucket.resetAt) {
+				delete(l.buckets, k)
+			}
+		}
+		l.lastCleanup = now
+	}
+
+	bucket, exists := l.buckets[key]
+	if !exists || !now.Before(bucket.resetAt) {
+		bucket = rateWindowCounter{
+			count:   0,
+			resetAt: now.Add(l.window),
+		}
+	}
+
+	if bucket.count >= l.limit {
+		return false, bucket.resetAt.Sub(now)
+	}
+
+	bucket.count++
+	l.buckets[key] = bucket
+	return true, 0
+}
+
+func (s *Server) isOriginAllowed(origin string) bool {
+	if s.allowAnyOrigin {
+		return true
+	}
+	_, ok := s.allowedOrigins[origin]
+	return ok
+}
+
+func (s *Server) clientIPFromRequest(r *nethttp.Request) string {
+	if s.trustProxyHeaders {
+		if forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwardedFor != "" {
+			parts := strings.Split(forwardedFor, ",")
+			if len(parts) > 0 {
+				if ip := parseIPCandidate(parts[0]); ip != "" {
+					return ip
+				}
+			}
+		}
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-Ip")); realIP != "" {
+			if ip := parseIPCandidate(realIP); ip != "" {
+				return ip
+			}
+		}
+	}
+
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		if ip := parseIPCandidate(host); ip != "" {
+			return ip
+		}
+	}
+	if ip := parseIPCandidate(r.RemoteAddr); ip != "" {
+		return ip
+	}
+	return "unknown"
+}
+
+func parseIPCandidate(raw string) string {
+	ip := net.ParseIP(strings.TrimSpace(raw))
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+func loadAllowedOriginsFromEnv() (map[string]struct{}, bool) {
+	raw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	if raw == "" {
+		raw = "http://localhost:3000,http://127.0.0.1:3000"
+	}
+
+	if raw == "*" {
+		return nil, true
+	}
+
+	origins := make(map[string]struct{}, 8)
+	for _, part := range strings.Split(raw, ",") {
+		origin := strings.TrimSpace(part)
+		if origin == "" {
+			continue
+		}
+		origins[origin] = struct{}{}
+	}
+	return origins, false
+}
+
+func loadAPIKeysFromEnv(key string) map[string]struct{} {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+
+	keys := make(map[string]struct{}, 8)
+	for _, part := range strings.Split(raw, ",") {
+		parsed := strings.TrimSpace(part)
+		if parsed == "" {
+			continue
+		}
+		keys[parsed] = struct{}{}
+	}
+	return keys
+}
+
+func parseBoolEnv(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func normalizeRequiredText(raw string, minLen, maxLen int, field string, allowNewLines bool) (string, error) {
+	normalized := strings.TrimSpace(normalizeLineBreaks(raw))
+	if normalized == "" {
+		return "", fmt.Errorf("%s is required", field)
+	}
+	if containsDisallowedControlChars(normalized, allowNewLines) {
+		return "", fmt.Errorf("%s contains unsupported control characters", field)
+	}
+	length := utf8.RuneCountInString(normalized)
+	if length < minLen || length > maxLen {
+		return "", fmt.Errorf("%s must be between %d and %d characters", field, minLen, maxLen)
+	}
+	return normalized, nil
+}
+
+func normalizeOptionalText(raw *string, maxLen int, field string, allowNewLines bool) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	normalized := strings.TrimSpace(normalizeLineBreaks(*raw))
+	if normalized == "" {
+		return nil, nil
+	}
+	if containsDisallowedControlChars(normalized, allowNewLines) {
+		return nil, fmt.Errorf("%s contains unsupported control characters", field)
+	}
+	if utf8.RuneCountInString(normalized) > maxLen {
+		return nil, fmt.Errorf("%s must be %d characters or fewer", field, maxLen)
+	}
+	return &normalized, nil
+}
+
+func normalizeLineBreaks(input string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(input, "\r\n", "\n"), "\r", "\n")
+}
+
+func containsDisallowedControlChars(input string, allowNewLines bool) bool {
+	for _, r := range input {
+		if !unicode.IsControl(r) {
+			continue
+		}
+		if allowNewLines && (r == '\n' || r == '\t') {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func normalizeClosesAt(raw *time.Time) (*time.Time, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	closesAt := raw.UTC()
+	if closesAt.Before(time.Now().UTC().Add(-1 * time.Minute)) {
+		return nil, errors.New("closes_at must be in the future")
+	}
+	return &closesAt, nil
+}
+
+func normalizeSlugParam(raw string) (string, error) {
+	slug := strings.TrimSpace(raw)
+	if slug == "" {
+		return "", errors.New("slug is required")
+	}
+	if len(slug) > slugMaxLength {
+		return "", fmt.Errorf("slug must be %d characters or fewer", slugMaxLength)
+	}
+	if !isValidSlug(slug) {
+		return "", errors.New("slug is invalid")
+	}
+	return slug, nil
+}
+
+func isValidSlug(slug string) bool {
+	if strings.HasPrefix(slug, "-") || strings.HasSuffix(slug, "-") {
+		return false
+	}
+	for _, r := range slug {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validateDecisionQueryParams(r *nethttp.Request) error {
+	for key := range r.URL.Query() {
+		if key != "viewer_id" {
+			return fmt.Errorf("unexpected query parameter: %s", key)
+		}
+	}
+	return nil
+}
+
+func decodeJSON(w nethttp.ResponseWriter, r *nethttp.Request, maxBytes int64, out any) error {
 	defer r.Body.Close()
-	dec := json.NewDecoder(r.Body)
+
+	limitedBody := nethttp.MaxBytesReader(w, r.Body, maxBytes)
+	dec := json.NewDecoder(limitedBody)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(out); err != nil {
+		var maxBytesErr *nethttp.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return fmt.Errorf("request body must be %d bytes or fewer", maxBytes)
+		}
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
