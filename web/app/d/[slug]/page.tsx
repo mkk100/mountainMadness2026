@@ -219,22 +219,26 @@ export default function DecisionPage() {
                 : ""}
             </p>
             <div className="vote-row">
-              <button
-                className={`vote-btn ${postVote.my_vote === 1 ? "active-up" : ""}`}
-                type="button"
-                disabled={isVotingPost || !supportsPostVote}
-                onClick={() => onVotePost(1)}
-              >
-                ▲ {postVote.upvotes}
-              </button>
-              <button
-                className={`vote-btn ${postVote.my_vote === -1 ? "active-down" : ""}`}
-                type="button"
-                disabled={isVotingPost || !supportsPostVote}
-                onClick={() => onVotePost(-1)}
-              >
-                ▼ {postVote.downvotes}
-              </button>
+              {!isCreatorView ? (
+                <>
+                  <button
+                    className={`vote-btn ${postVote.my_vote === 1 ? "active-up" : ""}`}
+                    type="button"
+                    disabled={isVotingPost || !supportsPostVote}
+                    onClick={() => onVotePost(1)}
+                  >
+                    ▲ {postVote.upvotes}
+                  </button>
+                  <button
+                    className={`vote-btn ${postVote.my_vote === -1 ? "active-down" : ""}`}
+                    type="button"
+                    disabled={isVotingPost || !supportsPostVote}
+                    onClick={() => onVotePost(-1)}
+                  >
+                    ▼ {postVote.downvotes}
+                  </button>
+                </>
+              ) : null}
               <strong>Post Score: {postVote.score}</strong>
             </div>
             {!supportsPostVote ? (
@@ -352,19 +356,6 @@ export default function DecisionPage() {
 
                   <div className="metric">
                     <strong>Summary</strong>
-                    {supportsRecommendation ? (
-                      <>
-                        <p>
-                          Model recommendation:{" "}
-                          {recommendation.decision === "yes" ? "Yes" : "No"}
-                        </p>
-                      </>
-                    ) : (
-                      <p className="muted">
-                        Model recommendation unavailable on current backend
-                        version.
-                      </p>
-                    )}
                     <p>Responses: {data.stats.response_count}</p>
                     <p>Avg rating: {data.stats.avg_rating.toFixed(2)}</p>
                     <p>Top emoji: {data.stats.top_emoji || "—"}</p>
@@ -386,6 +377,29 @@ export default function DecisionPage() {
                     )}
                   </div>
                 </div>
+              </article>
+            ) : null}
+
+            {isCreatorView ? (
+              <article className="card">
+                <h2>Model Recommendation</h2>
+                {supportsRecommendation ? (
+                  <>
+                    <p>
+                      According to our analysis, our model recommends{" "}
+                      <strong>
+                        {recommendation.decision === "yes"
+                          ? "pursuing"
+                          : "not pursuing"}
+                      </strong>{" "}
+                      this decision.
+                    </p>
+                  </>
+                ) : (
+                  <p className="muted">
+                    Model recommendation unavailable on current backend version.
+                  </p>
+                )}
               </article>
             ) : null}
 
