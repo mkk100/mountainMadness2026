@@ -11,3 +11,4 @@ Second, you share the link with your friends and let them vote!!!!
 Third, see the results and a suggestion from our model after the voting is finished!
 <img width="1119" height="979" alt="Screenshot 2026-03-02 at 7 14 26 PM" src="https://github.com/user-attachments/assets/c5d032ea-db86-4d65-845b-557adf9f30e2" />
 
+Note: we have discontinued the app due to backend costs.
